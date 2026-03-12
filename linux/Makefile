@@ -31,7 +31,7 @@ CORE_OBJS := \
 	$(BUILD_DIR)/moc/moc_eardetection.o
 
 CLI_OBJS := $(BUILD_DIR)/src/cli/main.o
-DAEMON_OBJS := $(BUILD_DIR)/src/daemon/main.o
+DAEMON_OBJS := $(BUILD_DIR)/src/cli/main_daemon.o
 
 LIB_TARGET := $(BUILD_DIR)/vibepods_core.a
 CLI_TARGET := $(BUILD_DIR)/vibepods-cli
@@ -57,9 +57,6 @@ $(BUILD_DIR)/src/core:
 $(BUILD_DIR)/src/cli:
 	mkdir -p $(BUILD_DIR)/src/cli
 
-$(BUILD_DIR)/src/daemon:
-	mkdir -p $(BUILD_DIR)/src/daemon
-
 $(BUILD_DIR)/moc:
 	mkdir -p $(BUILD_DIR)/moc
 
@@ -69,8 +66,8 @@ $(BUILD_DIR)/src/core/airpods_core_client.o: src/core/airpods_core_client.cpp | 
 $(BUILD_DIR)/src/cli/main.o: src/cli/main.cpp | $(BUILD_DIR)/src/cli
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(CXXSTD) $(WARNFLAGS) -fPIC -c $< -o $@
 
-$(BUILD_DIR)/src/daemon/main.o: src/daemon/main.cpp | $(BUILD_DIR)/src/daemon
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(CXXSTD) $(WARNFLAGS) -fPIC -c $< -o $@
+$(BUILD_DIR)/src/cli/main_daemon.o: src/cli/main.cpp | $(BUILD_DIR)/src/cli
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(CXXSTD) $(WARNFLAGS) -DVIBEPODS_BUILD_DAEMON -fPIC -c $< -o $@
 
 $(BUILD_DIR)/moc/moc_airpods_core_client.cpp: include/librepods/core/airpods_core_client.h | $(BUILD_DIR)/moc
 	$(MOC) $< -o $@
