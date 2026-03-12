@@ -91,6 +91,19 @@ bool connectViaBluetoothctl(const QString &mac, QString &detail)
     return true;
 }
 
+bool disconnectViaBluetoothctl(const QString &mac, QString &detail)
+{
+    QString out;
+    QString err;
+    if (!runCommand("bluetoothctl", {"disconnect", mac}, out, err))
+    {
+        detail = err.trimmed();
+        return false;
+    }
+    detail = out.trimmed();
+    return true;
+}
+
 bool tryRouteAudioToAirPods(const QString &mac, QString &detail)
 {
     const QString macUnderscore = mac.toLower().replace(':', '_');
@@ -388,7 +401,7 @@ int main(int argc, char *argv[])
     parser.setApplicationDescription("LibrePods core CLI");
     parser.addHelpOption();
 
-    parser.addPositionalArgument("command", "connect | status | mode | ca");
+    parser.addPositionalArgument("command", "connect | disconnect | status | mode | ca");
     parser.addPositionalArgument("value", "Command value: mode (off|nc|transparency|adaptive), ca (on|off)", "[value]");
     parser.addOption({{"m", "mac"}, "Bluetooth address of AirPods (optional)", "mac"});
     parser.addOption({{"j", "json"}, "Output status in JSON format"});
@@ -420,7 +433,7 @@ int main(int argc, char *argv[])
         err << "Missing command.\n";
         parser.showHelp(1);
     }
-    if (command != "connect" && command != "status" && command != "mode" && command != "ca")
+    if (command != "connect" && command != "disconnect" && command != "status" && command != "mode" && command != "ca")
     {
         QTextStream(stderr) << "unknown command: " << command << "\n";
         return 2;
@@ -537,6 +550,93 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    if (command == "disconnect")
+    {
+        QTextStream out(stdout);
+
+        const auto devices = queryBluezAirPods();
+        if (devices.isEmpty())
+        {
+            QTextStream(stderr) << "no AirPods found in BlueZ device list\n";
+            return 6;
+        }
+        if (!mac.isEmpty() && !isValidMac(mac))
+        {
+            QTextStream(stderr) << "invalid --mac format, expected AA:BB:CC:DD:EE:FF\n";
+            return 1;
+        }
+
+        QList<BluezAirPodsDevice> targets;
+        if (!mac.isEmpty())
+        {
+            for (const auto &d : devices)
+            {
+                if (d.address.compare(mac, Qt::CaseInsensitive) == 0)
+                {
+                    targets.push_back(d);
+                    break;
+                }
+            }
+            if (targets.isEmpty())
+            {
+                QTextStream(stderr) << "provided --mac not found in paired list\n";
+                return 1;
+            }
+        }
+        else
+        {
+            for (const auto &d : devices)
+            {
+                if (d.connected)
+                {
+                    targets.push_back(d);
+                }
+            }
+            if (targets.isEmpty())
+            {
+                out << "No connected AirPods found.\n";
+                out.flush();
+                return 0;
+            }
+        }
+
+        bool allOk = true;
+        for (const auto &target : targets)
+        {
+            if (!target.connected)
+            {
+                out << "Already disconnected: " << target.address << "\n";
+                continue;
+            }
+
+            out << "Disconnecting " << target.address << "...\n";
+            out.flush();
+
+            QString detail;
+            if (!disconnectViaBluetoothctl(target.address, detail))
+            {
+                QTextStream(stderr) << "bluetoothctl disconnect failed for "
+                                    << target.address << ": " << detail << "\n";
+                allOk = false;
+                continue;
+            }
+
+            QThread::msleep(900);
+            if (isBluezAirPodsConnected(target.address))
+            {
+                QTextStream(stderr) << "AirPods still connected in BlueZ state: "
+                                    << target.address << "\n";
+                allOk = false;
+                continue;
+            }
+
+            out << "Disconnected " << target.address << "\n";
+        }
+
+        out.flush();
+        return allOk ? 0 : 7;
+    }
+
     QString statusMac = mac;
     if (!statusMac.isEmpty() && !isValidMac(statusMac))
     {
@@ -594,7 +694,54 @@ int main(int argc, char *argv[])
     bool caRejected = false;
     bool caRetrySent = false;
     bool batteryDataSeen = false;
+    bool earDataSeen = false;
+    bool statusEarSettleDone = false;
     bool fatalConnectionError = false;
+    QTimer statusPollTimer;
+    statusPollTimer.setInterval(900);
+    int statusPollAttempts = 0;
+    QTimer statusEarSettleTimer;
+    statusEarSettleTimer.setSingleShot(true);
+    EarDetection::EarDetectionStatus statusLastPrimary = EarDetection::EarDetectionStatus::Disconnected;
+    EarDetection::EarDetectionStatus statusLastSecondary = EarDetection::EarDetectionStatus::Disconnected;
+
+    auto maybeFinishStatus = [&]()
+    {
+        if (command != "status" || printed)
+        {
+            return;
+        }
+        if (!earDataSeen || !statusEarSettleDone)
+        {
+            return;
+        }
+        statusPollTimer.stop();
+        printed = true;
+        printStatus(client, jsonOutput);
+        QCoreApplication::exit(0);
+    };
+
+    QObject::connect(&statusEarSettleTimer, &QTimer::timeout, &app, [&]()
+    {
+        statusEarSettleDone = true;
+        maybeFinishStatus();
+    });
+
+    QObject::connect(&statusPollTimer, &QTimer::timeout, &app, [&]()
+    {
+        if (command != "status" || printed)
+        {
+            statusPollTimer.stop();
+            return;
+        }
+        if (statusPollAttempts >= 8)
+        {
+            statusPollTimer.stop();
+            return;
+        }
+        client.requestStatusSnapshot();
+        ++statusPollAttempts;
+    });
 
     QObject::connect(&client, &AirPodsCoreClient::errorOccurred, &app, [&](const QString &message)
     {
@@ -717,6 +864,18 @@ int main(int argc, char *argv[])
             }
         });
     }
+    if (command == "status")
+    {
+        QObject::connect(&client, &AirPodsCoreClient::protocolReady, &app, [&]()
+        {
+            // Trigger fresh notifications, then keep polling briefly to avoid stale
+            // transitional ear-detection values on connect.
+            statusPollAttempts = 0;
+            client.requestStatusSnapshot();
+            ++statusPollAttempts;
+            statusPollTimer.start();
+        });
+    }
 
     QObject::connect(&client, &AirPodsCoreClient::stateChanged, &app, [&]()
     {
@@ -733,13 +892,40 @@ int main(int argc, char *argv[])
         {
             batteryDataSeen = true;
         }
+        const bool hasEarData =
+            client.earDetection().getprimaryStatus() != EarDetection::EarDetectionStatus::Disconnected ||
+            client.earDetection().getsecondaryStatus() != EarDetection::EarDetectionStatus::Disconnected;
+        if (hasEarData)
+        {
+            earDataSeen = true;
+            if (command == "status")
+            {
+                const auto currentPrimary = client.earDetection().getprimaryStatus();
+                const auto currentSecondary = client.earDetection().getsecondaryStatus();
+                const bool changed =
+                    currentPrimary != statusLastPrimary || currentSecondary != statusLastSecondary;
+                if (changed)
+                {
+                    statusLastPrimary = currentPrimary;
+                    statusLastSecondary = currentSecondary;
+                    statusEarSettleDone = false;
+
+                    // Asymmetric in-ear states tend to be transitional when buds are
+                    // moving in/out of ears or case; wait a bit longer.
+                    const bool primaryInEar = currentPrimary == EarDetection::EarDetectionStatus::InEar;
+                    const bool secondaryInEar = currentSecondary == EarDetection::EarDetectionStatus::InEar;
+                    const int settleMs = (primaryInEar != secondaryInEar) ? 2500 : 700;
+                    statusEarSettleTimer.start(settleMs);
+                }
+            }
+        }
 
         if (command == "mode")
         {
             if (modeCommandSent && client.state().noiseControlMode == targetMode)
             {
                 modeConfirmed = true;
-                if (batteryDataSeen && !printed)
+                if (batteryDataSeen && earDataSeen && !printed)
                 {
                     printed = true;
                     printStatus(client, jsonOutput);
@@ -753,7 +939,7 @@ int main(int argc, char *argv[])
             if (caCommandSent && client.state().conversationalAwareness == targetCaEnabled)
             {
                 caConfirmed = true;
-                if (batteryDataSeen && !printed)
+                if (batteryDataSeen && earDataSeen && !printed)
                 {
                     printed = true;
                     printStatus(client, jsonOutput);
@@ -763,12 +949,7 @@ int main(int argc, char *argv[])
             return;
         }
 
-        if (batteryDataSeen && !printed)
-        {
-            printed = true;
-            printStatus(client, jsonOutput);
-            QCoreApplication::exit(0);
-        }
+        maybeFinishStatus();
     });
 
     QTimer::singleShot(qMax(1, timeoutSec) * 1000, &app, [&]()
@@ -784,13 +965,13 @@ int main(int argc, char *argv[])
             {
                 if (modeConfirmed)
                 {
-                    if (batteryDataSeen)
+                    if (batteryDataSeen && earDataSeen)
                     {
                         QTextStream(stderr) << "mode set; printing current status\n";
                     }
                     else
                     {
-                        QTextStream(stderr) << "mode set but timeout waiting for battery update, printing partial status\n";
+                        QTextStream(stderr) << "mode set but timeout waiting for battery/ear-detection update, printing partial status\n";
                     }
                 }
                 else
@@ -806,13 +987,13 @@ int main(int argc, char *argv[])
             {
                 if (caConfirmed)
                 {
-                    if (batteryDataSeen)
+                    if (batteryDataSeen && earDataSeen)
                     {
                         QTextStream(stderr) << "ca set; printing current status\n";
                     }
                     else
                     {
-                        QTextStream(stderr) << "ca set but timeout waiting for battery update, printing partial status\n";
+                        QTextStream(stderr) << "ca set but timeout waiting for battery/ear-detection update, printing partial status\n";
                     }
                 }
                 else
@@ -829,8 +1010,9 @@ int main(int argc, char *argv[])
             }
             else
             {
-                QTextStream(stderr) << "timeout waiting for battery update, printing partial status\n";
+                QTextStream(stderr) << "timeout waiting for ear-detection update, printing partial status\n";
             }
+            statusPollTimer.stop();
             printStatus(client, jsonOutput);
             QCoreApplication::exit(4);
             return;

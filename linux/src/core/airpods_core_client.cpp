@@ -91,6 +91,11 @@ bool AirPodsCoreClient::renameAirPods(const QString &newName)
     return writePacket(AirPodsPackets::Rename::getPacket(newName), "rename");
 }
 
+bool AirPodsCoreClient::requestStatusSnapshot()
+{
+    return writePacket(AirPodsPackets::Phone::STATUS_REQUEST, "status-request");
+}
+
 void AirPodsCoreClient::setupSocketSignals()
 {
     connect(socket_, &QBluetoothSocket::connected, this, [this]()

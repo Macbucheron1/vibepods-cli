@@ -33,7 +33,7 @@ public:
 
     bool parseData(const QByteArray &data)
     {
-        if (data.size() < 2)
+        if (data.size() < 8)
         {
             return false;
         }
@@ -69,8 +69,10 @@ signals:
 private:
     QPair<EarDetectionStatus, EarDetectionStatus> parseStatusBytes(const QByteArray &data) const
     {
-        quint8 primaryByte = static_cast<quint8>(data[6]);
-        quint8 secondaryByte = static_cast<quint8>(data[7]);
+        // On recent AirPods models, the two ear-state bytes arrive in reverse order
+        // relative to how we expose primary/secondary in this class.
+        quint8 primaryByte = static_cast<quint8>(data[7]);
+        quint8 secondaryByte = static_cast<quint8>(data[6]);
 
         auto primaryStatus = parseStatusByte(primaryByte);
         auto secondaryStatus = parseStatusByte(secondaryByte);

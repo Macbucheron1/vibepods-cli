@@ -36,6 +36,7 @@ public:
     bool setConversationalAwareness(bool enabled);
     bool setHearingAidEnabled(bool enabled);
     bool renameAirPods(const QString &newName);
+    bool requestStatusSnapshot();
     bool isProtocolReady() const { return protocolReady_; }
 
     const AirPodsCoreState &state() const { return state_; }
