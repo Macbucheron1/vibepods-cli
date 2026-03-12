@@ -8,7 +8,8 @@ testing.py
 .DS_Store
 CMakeLists.txt.user*
 
-# Android Template
+# nix
+result
 
 
 ### Android ###
