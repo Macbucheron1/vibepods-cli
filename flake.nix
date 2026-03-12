@@ -1,5 +1,5 @@
 {
-  description = "LibrePods core + CLI development shell (Makefile-based)";
+  description = "VibePods CLI development shell (Makefile-based)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -20,12 +20,12 @@
           ];
         };
 
-        packages.librepods = pkgs.stdenv.mkDerivation {
-          pname = "librepods";
+        packages.vibepods_cli = pkgs.stdenv.mkDerivation {
+          pname = "vibepods-cli";
           version = "0.1.0";
           src = builtins.path {
             path = ./.;
-            name = "librepods-src";
+            name = "vibepods-cli-src";
           };
 
           nativeBuildInputs = with pkgs; [
@@ -52,6 +52,10 @@
           '';
         };
 
-        packages.default = self.packages.${system}.librepods;
+        packages.default = self.packages.${system}.vibepods_cli;
+        apps.default = {
+          type = "app";
+          program = "${self.packages.${system}.vibepods_cli}/bin/vibepods-cli";
+        };
       });
 }

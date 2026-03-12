@@ -32,8 +32,8 @@ CORE_OBJS := \
 
 CLI_OBJS := $(BUILD_DIR)/src/cli/main.o
 
-LIB_TARGET := $(BUILD_DIR)/librepods_core.a
-CLI_TARGET := $(BUILD_DIR)/librepods-cli
+LIB_TARGET := $(BUILD_DIR)/vibepods_core.a
+CLI_TARGET := $(BUILD_DIR)/vibepods-cli
 
 .PHONY: all lib cli clean install
 .NOTPARALLEL:
@@ -91,8 +91,8 @@ install: all
 	install -d "$(DESTDIR)$(BINDIR)"
 	install -d "$(DESTDIR)$(INCLUDEDIR)"
 	install -d "$(DESTDIR)$(PKGCONFIGDIR)"
-	install -m644 "$(LIB_TARGET)" "$(DESTDIR)$(LIBDIR)/librepods_core.a"
-	install -m755 "$(CLI_TARGET)" "$(DESTDIR)$(BINDIR)/librepods-cli"
+	install -m644 "$(LIB_TARGET)" "$(DESTDIR)$(LIBDIR)/vibepods_core.a"
+	install -m755 "$(CLI_TARGET)" "$(DESTDIR)$(BINDIR)/vibepods-cli"
 	cp -r include/librepods "$(DESTDIR)$(INCLUDEDIR)/"
 	@{ \
 		echo "prefix=$(PREFIX)"; \
@@ -100,14 +100,14 @@ install: all
 		echo "libdir=\$${exec_prefix}/lib"; \
 		echo "includedir=\$${prefix}/include"; \
 		echo ""; \
-		echo "Name: librepods"; \
-		echo "Description: LibrePods core static library"; \
+		echo "Name: vibepods-cli"; \
+		echo "Description: VibePods CLI core static library"; \
 		echo "Version: 0.1.0"; \
 		echo "Requires: Qt6Core Qt6Bluetooth"; \
-		echo "Libs: -L\$${libdir} -lrepods_core"; \
+		echo "Libs: -L\$${libdir} -lvibepods_core"; \
 		echo "Cflags: -I\$${includedir}"; \
-	} > "$(BUILD_DIR)/librepods.pc"
-	install -m644 "$(BUILD_DIR)/librepods.pc" "$(DESTDIR)$(PKGCONFIGDIR)/librepods.pc"
+	} > "$(BUILD_DIR)/vibepods.pc"
+	install -m644 "$(BUILD_DIR)/vibepods.pc" "$(DESTDIR)$(PKGCONFIGDIR)/vibepods.pc"
 
 clean:
 	rm -rf "$(BUILD_DIR)"

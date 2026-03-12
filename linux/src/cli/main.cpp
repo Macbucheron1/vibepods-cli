@@ -14,7 +14,7 @@
 #include <librepods/core/airpods_core_client.h>
 #include <librepods/enums.h>
 
-Q_LOGGING_CATEGORY(librepods, "librepods")
+Q_LOGGING_CATEGORY(vibepods, "vibepods")
 
 using namespace AirpodsTrayApp::Enums;
 using ManagedObjectList = QMap<QDBusObjectPath, QMap<QString, QVariantMap>>;
@@ -360,6 +360,7 @@ void printStatus(const AirPodsCoreClient &client, bool asJson)
     if (asJson)
     {
         QJsonObject obj;
+        obj.insert("connected", true);
         obj.insert("address", state.bluetoothAddress);
         obj.insert("name", state.deviceName.isEmpty() ? "unknown" : state.deviceName);
         obj.insert("model", toModelString(state.model));
@@ -376,6 +377,7 @@ void printStatus(const AirPodsCoreClient &client, bool asJson)
     }
 
     QTextStream out(stdout);
+    out << "connected: yes\n";
     out << "address: " << state.bluetoothAddress << "\n";
     out << "name: " << (state.deviceName.isEmpty() ? "unknown" : state.deviceName) << "\n";
     out << "model: " << toModelString(state.model) << "\n";
@@ -390,16 +392,59 @@ void printStatus(const AirPodsCoreClient &client, bool asJson)
     out.flush();
 }
 
+void printDisconnectedStatus(const QString &address, bool asJson)
+{
+    if (asJson)
+    {
+        QJsonObject obj;
+        obj.insert("connected", false);
+        obj.insert("address", address.isEmpty() ? QJsonValue::Null : QJsonValue(address));
+        obj.insert("name", QJsonValue::Null);
+        obj.insert("model", QJsonValue::Null);
+        obj.insert("noise_control", QJsonValue::Null);
+        obj.insert("conversational_awareness", QJsonValue::Null);
+        obj.insert("hearing_aid", QJsonValue::Null);
+        obj.insert("left_battery", QJsonValue::Null);
+        obj.insert("right_battery", QJsonValue::Null);
+        obj.insert("case_battery", QJsonValue::Null);
+        obj.insert("left_in_ear", QJsonValue::Null);
+        obj.insert("right_in_ear", QJsonValue::Null);
+        QTextStream(stdout) << QJsonDocument(obj).toJson(QJsonDocument::Compact) << "\n";
+        return;
+    }
+
+    QTextStream out(stdout);
+    out << "connected: no\n";
+    out << "address: " << (address.isEmpty() ? "n/a" : address) << "\n";
+    out.flush();
+}
+
+void printCliHelp(QTextStream &out)
+{
+    out << "Usage: vibepods-cli [options] command [value]\n";
+    out << "VibePods CLI\n\n";
+    out << "Options:\n";
+    out << "  -h, --help               Display this help message\n";
+    out << "  -m, --mac <mac>          Bluetooth address of AirPods (optional)\n";
+    out << "  -j, --json               Output status in JSON format\n";
+    out << "  -d, --debug              Enable verbose debug logs\n";
+    out << "  -t, --timeout <seconds>  Timeout in seconds\n\n";
+    out << "Arguments:\n";
+    out << "  command                  connect | disconnect | status | mode | ca\n";
+    out << "  value                    Command value: mode (off|nc|transparency|adaptive), ca (on|off)\n";
+    out.flush();
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
-    QCoreApplication::setApplicationName("librepods-cli");
+    QCoreApplication::setApplicationName("vibepods-cli");
 
     QCommandLineParser parser;
-    parser.setApplicationDescription("LibrePods core CLI");
-    parser.addHelpOption();
+    parser.setApplicationDescription("VibePods CLI");
+    parser.addOption({{"h", "help"}, "Display this help message"});
 
     parser.addPositionalArgument("command", "connect | disconnect | status | mode | ca");
     parser.addPositionalArgument("value", "Command value: mode (off|nc|transparency|adaptive), ca (on|off)", "[value]");
@@ -409,6 +454,12 @@ int main(int argc, char *argv[])
     parser.addOption({{"t", "timeout"}, "Timeout in seconds", "seconds", "12"});
 
     parser.process(app);
+    if (parser.isSet("help"))
+    {
+        QTextStream out(stdout);
+        printCliHelp(out);
+        return 0;
+    }
 
     const QStringList positional = parser.positionalArguments();
     const QString command = positional.isEmpty() ? QString() : positional.first().trimmed().toLower();
@@ -420,18 +471,19 @@ int main(int argc, char *argv[])
 
     if (debugOutput)
     {
-        QLoggingCategory::setFilterRules("librepods.info=true\nlibrepods.debug=true");
+        QLoggingCategory::setFilterRules("vibepods.info=true\nvibepods.debug=true");
     }
     else
     {
-        QLoggingCategory::setFilterRules("librepods.info=false\nlibrepods.debug=false");
+        QLoggingCategory::setFilterRules("vibepods.info=false\nvibepods.debug=false");
     }
 
     QTextStream err(stderr);
     if (command.isEmpty())
     {
         err << "Missing command.\n";
-        parser.showHelp(1);
+        printCliHelp(err);
+        return 1;
     }
     if (command != "connect" && command != "disconnect" && command != "status" && command != "mode" && command != "ca")
     {
@@ -494,7 +546,7 @@ int main(int argc, char *argv[])
         }
         else
         {
-            out << "AirPods disponibles:\n";
+            out << "Available AirPods:\n";
             for (int i = 0; i < devices.size(); ++i)
             {
                 const auto &d = devices.at(i);
@@ -504,7 +556,7 @@ int main(int argc, char *argv[])
                     << (d.connected ? " [already connected]" : "")
                     << "\n";
             }
-            out << "Choisis un numero: ";
+            out << "Choose a number: ";
             out.flush();
             const QString line = in.readLine().trimmed();
             bool ok = false;
@@ -545,7 +597,7 @@ int main(int argc, char *argv[])
         {
             out << "Connected. Audio routing not forced (" << audioDetail << ").\n";
         }
-        out << "Tu peux maintenant lancer ton audio.\n";
+        out << "You can now start audio playback.\n";
         out.flush();
         return 0;
     }
@@ -660,26 +712,37 @@ int main(int argc, char *argv[])
         }
         if (statusMac.isEmpty())
         {
+            if (command == "status")
+            {
+                printDisconnectedStatus(QString(), jsonOutput);
+                return 0;
+            }
             err << "no AirPods found in BlueZ list, connect first\n";
             return 6;
         }
     }
 
-    // For status/mode, try to bring the device online if BlueZ says it's disconnected.
+    // For mode/ca, try to bring the device online if BlueZ says it's disconnected.
     if (!isBluezAirPodsConnected(statusMac))
     {
+        if (command == "status")
+        {
+            printDisconnectedStatus(statusMac, jsonOutput);
+            return 0;
+        }
+
         QString detail;
         if (!connectViaBluetoothctl(statusMac, detail))
         {
             QTextStream(stderr) << "AirPods not connected and auto-connect failed: " << detail << "\n";
-            QTextStream(stderr) << "Run `librepods-cli connect` first.\n";
+            QTextStream(stderr) << "Run `vibepods-cli connect` first.\n";
             return 7;
         }
         QThread::msleep(1200);
         if (!isBluezAirPodsConnected(statusMac))
         {
             QTextStream(stderr) << "AirPods auto-connect attempted but device is still disconnected.\n";
-            QTextStream(stderr) << "Run `librepods-cli connect` first.\n";
+            QTextStream(stderr) << "Run `vibepods-cli connect` first.\n";
             return 8;
         }
     }
@@ -751,7 +814,7 @@ int main(int argc, char *argv[])
             message.contains("Invalid Bluetooth address", Qt::CaseInsensitive))
         {
             fatalConnectionError = true;
-            QTextStream(stderr) << "AirPods not ready for AACP. Run `librepods-cli connect` then retry.\n";
+            QTextStream(stderr) << "AirPods not ready for AACP. Run `vibepods-cli connect` then retry.\n";
             QCoreApplication::exit(9);
         }
     });

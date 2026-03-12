@@ -1,15 +1,15 @@
-# librepods
+# vibepods-cli
 
-Librepods as CLI 100% vibecoded
+VibePods CLI
 
 ## CLI
 
 ```bash
-./librepods-cli connect
-./librepods-cli disconnect
-./librepods-cli status
-./librepods-cli mode nc
-./librepods-cli ca on
+./vibepods-cli connect
+./vibepods-cli disconnect
+./vibepods-cli status
+./vibepods-cli mode nc
+./vibepods-cli ca on
 ```
 
-`disconnect` deconnecte les AirPods connectes (ou l'adresse specifiee avec `--mac`).
+`disconnect` disconnects connected AirPods (or the device specified with `--mac`).
