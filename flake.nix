@@ -57,5 +57,9 @@
           type = "app";
           program = "${self.packages.${system}.vibepods_cli}/bin/vibepods-cli";
         };
+        apps.daemon = {
+          type = "app";
+          program = "${self.packages.${system}.vibepods_cli}/bin/vibepods-daemon";
+        };
       });
 }
