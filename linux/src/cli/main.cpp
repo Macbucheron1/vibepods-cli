@@ -1431,7 +1431,38 @@ public:
 
         connect(&pendingControlTimer_, &QTimer::timeout, this, [this]()
         {
+            if (pendingControlKind_ == PendingControlKind::Status)
+            {
+                finishPendingControl(true);
+                return;
+            }
             finishPendingControl(false, QStringLiteral("timeout waiting for daemon command confirmation"));
+        });
+
+        pendingStatusPollTimer_.setInterval(350);
+        connect(&pendingStatusPollTimer_, &QTimer::timeout, this, [this]()
+        {
+            if (pendingControlKind_ != PendingControlKind::Status)
+            {
+                pendingStatusPollTimer_.stop();
+                return;
+            }
+            if (pendingStatusPollAttempts_ >= 6)
+            {
+                pendingStatusPollTimer_.stop();
+                return;
+            }
+            requestSnapshot("ipc-status-poll");
+            ++pendingStatusPollAttempts_;
+        });
+
+        pendingStatusSettleTimer_.setSingleShot(true);
+        connect(&pendingStatusSettleTimer_, &QTimer::timeout, this, [this]()
+        {
+            if (pendingControlKind_ == PendingControlKind::Status)
+            {
+                finishPendingControl(true);
+            }
         });
 
         connect(&client_, &AirPodsCoreClient::connected, this, [this]()
@@ -1468,6 +1499,20 @@ public:
             markStateDirty();
             writeStateFile();
             tryCompletePendingControl();
+        });
+
+        connect(&client_, &AirPodsCoreClient::packetReceived, this, [this](const QByteArray &packet)
+        {
+            if (packet.size() != 8 || !packet.startsWith(AirPodsPackets::Parse::EAR_DETECTION))
+            {
+                return;
+            }
+
+            if (pendingControlKind_ == PendingControlKind::Status)
+            {
+                pendingStatusPollTimer_.stop();
+                pendingStatusSettleTimer_.start(statusSettleDelayMs());
+            }
         });
 
         connect(&client_, &AirPodsCoreClient::errorOccurred, this, [this](const QString &message)
@@ -1521,9 +1566,17 @@ public:
     }
 
 private:
+    int statusSettleDelayMs() const
+    {
+        const bool primaryInEar = client_.earDetection().getprimaryStatus() == EarDetection::EarDetectionStatus::InEar;
+        const bool secondaryInEar = client_.earDetection().getsecondaryStatus() == EarDetection::EarDetectionStatus::InEar;
+        return (primaryInEar != secondaryInEar) ? 2500 : 700;
+    }
+
     enum class PendingControlKind
     {
         None,
+        Status,
         Mode,
         Ca,
     };
@@ -1585,6 +1638,9 @@ private:
         pendingTargetCaEnabled_ = false;
         pendingTargetMode_ = NoiseControlMode::Off;
         pendingControlTimer_.stop();
+        pendingStatusPollTimer_.stop();
+        pendingStatusSettleTimer_.stop();
+        pendingStatusPollAttempts_ = 0;
     }
 
     void finishPendingControl(bool ok, const QString &error = QString())
@@ -1646,8 +1702,19 @@ private:
 
         if (command == "status")
         {
+            if (!client_.isConnected() || !client_.isProtocolReady())
+            {
+                sendControlReply(socket, true);
+                return;
+            }
+            if (!beginPendingControl(socket, PendingControlKind::Status))
+            {
+                return;
+            }
+            pendingStatusPollAttempts_ = 0;
             requestSnapshot("ipc-status");
-            sendControlReply(socket, true);
+            ++pendingStatusPollAttempts_;
+            pendingStatusPollTimer_.start();
             return;
         }
 
@@ -1990,10 +2057,13 @@ private:
     QTimer snapshotTimer_;
     QLocalServer controlServer_;
     QTimer pendingControlTimer_;
+    QTimer pendingStatusPollTimer_;
+    QTimer pendingStatusSettleTimer_;
     QPointer<QLocalSocket> pendingControlSocket_;
     PendingControlKind pendingControlKind_ = PendingControlKind::None;
     NoiseControlMode pendingTargetMode_ = NoiseControlMode::Off;
     bool pendingTargetCaEnabled_ = false;
+    int pendingStatusPollAttempts_ = 0;
 };
 
 } // namespace
