@@ -1650,7 +1650,10 @@ private:
         QPointer<QLocalSocket> socket = pendingControlSocket_;
         const PendingControlKind kind = pendingControlKind_;
         const bool includeEarStatus =
-            !(kind == PendingControlKind::Status && !pendingStatusSawFreshEarData_);
+            !(kind == PendingControlKind::Status &&
+              !pendingStatusSawFreshEarData_ &&
+              lastKnownPrimaryEarStatus_ == EarDetection::EarDetectionStatus::Disconnected &&
+              lastKnownSecondaryEarStatus_ == EarDetection::EarDetectionStatus::Disconnected);
         clearPendingControl();
         sendControlReply(socket, ok, error, includeEarStatus);
     }
@@ -1975,9 +1978,18 @@ private:
         const auto right = battery.getState(Battery::Component::Right);
         const auto caze = battery.getState(Battery::Component::Case);
         const auto headset = battery.getState(Battery::Component::Headset);
+        const auto primaryEarStatus =
+            ears.getprimaryStatus() != EarDetection::EarDetectionStatus::Disconnected
+                ? ears.getprimaryStatus()
+                : lastKnownPrimaryEarStatus_;
+        const auto secondaryEarStatus =
+            ears.getsecondaryStatus() != EarDetection::EarDetectionStatus::Disconnected
+                ? ears.getsecondaryStatus()
+                : lastKnownSecondaryEarStatus_;
         const bool hasEarData =
-            ears.getprimaryStatus() != EarDetection::EarDetectionStatus::Disconnected ||
-            ears.getsecondaryStatus() != EarDetection::EarDetectionStatus::Disconnected;
+            bluezConnected_ &&
+            (primaryEarStatus != EarDetection::EarDetectionStatus::Disconnected ||
+             secondaryEarStatus != EarDetection::EarDetectionStatus::Disconnected);
 
         QJsonObject obj;
         obj.insert("connected", bluezConnected_);
@@ -2001,8 +2013,12 @@ private:
         obj.insert("right_battery", batteryValue(right));
         obj.insert("case_battery", batteryValue(caze));
         obj.insert("headset_battery", batteryValue(headset));
-        obj.insert("left_in_ear", (includeEarStatus && hasEarData) ? QJsonValue(ears.isPrimaryInEar()) : QJsonValue::Null);
-        obj.insert("right_in_ear", (includeEarStatus && hasEarData) ? QJsonValue(ears.isSecondaryInEar()) : QJsonValue::Null);
+        obj.insert("left_in_ear", (includeEarStatus && hasEarData)
+                                      ? QJsonValue(primaryEarStatus == EarDetection::EarDetectionStatus::InEar)
+                                      : QJsonValue::Null);
+        obj.insert("right_in_ear", (includeEarStatus && hasEarData)
+                                       ? QJsonValue(secondaryEarStatus == EarDetection::EarDetectionStatus::InEar)
+                                       : QJsonValue::Null);
         obj.insert("updated_at", lastStateChangeAt_.toString(Qt::ISODateWithMs));
         obj.insert("last_refresh_at", lastRefreshAt_.isValid() ? QJsonValue(lastRefreshAt_.toString(Qt::ISODateWithMs))
                                                                : QJsonValue::Null);
@@ -2028,6 +2044,14 @@ private:
         {
             lastKnownName_ = client_.state().deviceName;
         }
+        if (client_.earDetection().getprimaryStatus() != EarDetection::EarDetectionStatus::Disconnected)
+        {
+            lastKnownPrimaryEarStatus_ = client_.earDetection().getprimaryStatus();
+        }
+        if (client_.earDetection().getsecondaryStatus() != EarDetection::EarDetectionStatus::Disconnected)
+        {
+            lastKnownSecondaryEarStatus_ = client_.earDetection().getsecondaryStatus();
+        }
     }
 
     void writeStateFile()
@@ -2050,6 +2074,8 @@ private:
     QString bluezName_;
     QString lastKnownAddress_;
     QString lastKnownName_;
+    EarDetection::EarDetectionStatus lastKnownPrimaryEarStatus_ = EarDetection::EarDetectionStatus::Disconnected;
+    EarDetection::EarDetectionStatus lastKnownSecondaryEarStatus_ = EarDetection::EarDetectionStatus::Disconnected;
     QString statePath_;
     QString controlSocketPath_;
     QString lastError_;
