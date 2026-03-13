@@ -1510,6 +1510,7 @@ public:
 
             if (pendingControlKind_ == PendingControlKind::Status)
             {
+                pendingStatusSawFreshEarData_ = true;
                 pendingStatusPollTimer_.stop();
                 pendingStatusSettleTimer_.start(statusSettleDelayMs());
             }
@@ -1613,7 +1614,7 @@ private:
         }
     }
 
-    void sendControlReply(QLocalSocket *socket, bool ok, const QString &error = QString())
+    void sendControlReply(QLocalSocket *socket, bool ok, const QString &error = QString(), bool includeEarStatus = true)
     {
         if (!socket)
         {
@@ -1624,7 +1625,7 @@ private:
         QJsonObject reply;
         reply.insert("ok", ok);
         reply.insert("error", error.isEmpty() ? QJsonValue::Null : QJsonValue(error));
-        reply.insert("status", buildStateObject());
+        reply.insert("status", buildStateObject(includeEarStatus));
         socket->write(QJsonDocument(reply).toJson(QJsonDocument::Compact) + '\n');
         socket->flush();
         socket->waitForBytesWritten(1000);
@@ -1637,6 +1638,7 @@ private:
         pendingControlKind_ = PendingControlKind::None;
         pendingTargetCaEnabled_ = false;
         pendingTargetMode_ = NoiseControlMode::Off;
+        pendingStatusSawFreshEarData_ = false;
         pendingControlTimer_.stop();
         pendingStatusPollTimer_.stop();
         pendingStatusSettleTimer_.stop();
@@ -1646,8 +1648,11 @@ private:
     void finishPendingControl(bool ok, const QString &error = QString())
     {
         QPointer<QLocalSocket> socket = pendingControlSocket_;
+        const PendingControlKind kind = pendingControlKind_;
+        const bool includeEarStatus =
+            !(kind == PendingControlKind::Status && !pendingStatusSawFreshEarData_);
         clearPendingControl();
-        sendControlReply(socket, ok, error);
+        sendControlReply(socket, ok, error, includeEarStatus);
     }
 
     void tryCompletePendingControl()
@@ -1711,6 +1716,7 @@ private:
             {
                 return;
             }
+            pendingStatusSawFreshEarData_ = false;
             pendingStatusPollAttempts_ = 0;
             requestSnapshot("ipc-status");
             ++pendingStatusPollAttempts_;
@@ -1960,7 +1966,7 @@ private:
         return static_cast<int>(state.level);
     }
 
-    QJsonObject buildStateObject() const
+    QJsonObject buildStateObject(bool includeEarStatus = true) const
     {
         const auto &state = client_.state();
         const auto &battery = client_.battery();
@@ -1995,8 +2001,8 @@ private:
         obj.insert("right_battery", batteryValue(right));
         obj.insert("case_battery", batteryValue(caze));
         obj.insert("headset_battery", batteryValue(headset));
-        obj.insert("left_in_ear", hasEarData ? QJsonValue(ears.isPrimaryInEar()) : QJsonValue::Null);
-        obj.insert("right_in_ear", hasEarData ? QJsonValue(ears.isSecondaryInEar()) : QJsonValue::Null);
+        obj.insert("left_in_ear", (includeEarStatus && hasEarData) ? QJsonValue(ears.isPrimaryInEar()) : QJsonValue::Null);
+        obj.insert("right_in_ear", (includeEarStatus && hasEarData) ? QJsonValue(ears.isSecondaryInEar()) : QJsonValue::Null);
         obj.insert("updated_at", lastStateChangeAt_.toString(Qt::ISODateWithMs));
         obj.insert("last_refresh_at", lastRefreshAt_.isValid() ? QJsonValue(lastRefreshAt_.toString(Qt::ISODateWithMs))
                                                                : QJsonValue::Null);
@@ -2063,6 +2069,7 @@ private:
     PendingControlKind pendingControlKind_ = PendingControlKind::None;
     NoiseControlMode pendingTargetMode_ = NoiseControlMode::Off;
     bool pendingTargetCaEnabled_ = false;
+    bool pendingStatusSawFreshEarData_ = false;
     int pendingStatusPollAttempts_ = 0;
 };
 
