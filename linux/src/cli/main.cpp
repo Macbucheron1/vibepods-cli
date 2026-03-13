@@ -1,5 +1,6 @@
 #include <QCoreApplication>
 #include <QCommandLineParser>
+#include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QDateTime>
 #include <QDir>
@@ -10,8 +11,12 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLoggingCategory>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSharedPointer>
 #include <QTextStream>
 #include <QThread>
 #include <QTimer>
@@ -32,6 +37,34 @@ Q_DECLARE_METATYPE(ManagedObjectList)
 namespace
 {
 constexpr const char *kAirPodsAacpUuid = "74ec2172-0bad-4d01-8f77-997b2be0722a";
+
+QString defaultRuntimeRoot()
+{
+    QString root = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    if (root.isEmpty())
+    {
+        root = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation);
+    }
+    if (root.isEmpty())
+    {
+        root = QDir::homePath() + "/.cache";
+    }
+    return root + "/vibepods";
+}
+
+QString defaultControlSocketPath()
+{
+    return defaultRuntimeRoot() + "/control.sock";
+}
+
+QString controlSocketNameForPath(const QString &socketPath)
+{
+    const QString normalized = socketPath.trimmed().isEmpty()
+                                   ? defaultControlSocketPath()
+                                   : socketPath.trimmed();
+    const QByteArray digest = QCryptographicHash::hash(normalized.toUtf8(), QCryptographicHash::Sha256).toHex();
+    return QStringLiteral("vibepods-%1").arg(QString::fromLatin1(digest.left(24)));
+}
 
 QString normalizeMac(QString mac)
 {
@@ -350,7 +383,7 @@ QString toModelString(AirPodsModel model)
     }
 }
 
-void printStatus(const AirPodsCoreClient &client, bool asJson)
+QJsonObject localStatusObject(const AirPodsCoreClient &client)
 {
     const auto &state = client.state();
     const auto &battery = client.battery();
@@ -359,75 +392,156 @@ void printStatus(const AirPodsCoreClient &client, bool asJson)
     const auto left = battery.getState(Battery::Component::Left);
     const auto right = battery.getState(Battery::Component::Right);
     const auto caze = battery.getState(Battery::Component::Case);
-    const auto formatBattery = [](const Battery::BatteryState &s) -> QString
-    {
-        if (s.status == Battery::BatteryStatus::Disconnected)
-        {
-            return "n/a";
-        }
-        return QString::number(static_cast<int>(s.level));
-    };
-
-    if (asJson)
-    {
-        QJsonObject obj;
-        obj.insert("connected", true);
-        obj.insert("address", state.bluetoothAddress);
-        obj.insert("name", state.deviceName.isEmpty() ? "unknown" : state.deviceName);
-        obj.insert("model", toModelString(state.model));
-        obj.insert("noise_control", toNoiseControlString(state.noiseControlMode));
-        obj.insert("conversational_awareness", state.conversationalAwareness);
-        obj.insert("hearing_aid", state.hearingAidEnabled);
-        obj.insert("left_battery", left.status == Battery::BatteryStatus::Disconnected ? QJsonValue::Null : QJsonValue(static_cast<int>(left.level)));
-        obj.insert("right_battery", right.status == Battery::BatteryStatus::Disconnected ? QJsonValue::Null : QJsonValue(static_cast<int>(right.level)));
-        obj.insert("case_battery", caze.status == Battery::BatteryStatus::Disconnected ? QJsonValue::Null : QJsonValue(static_cast<int>(caze.level)));
-        obj.insert("left_in_ear", ears.isPrimaryInEar());
-        obj.insert("right_in_ear", ears.isSecondaryInEar());
-        QTextStream(stdout) << QJsonDocument(obj).toJson(QJsonDocument::Compact) << "\n";
-        return;
-    }
-
-    QTextStream out(stdout);
-    out << "connected: yes\n";
-    out << "address: " << state.bluetoothAddress << "\n";
-    out << "name: " << (state.deviceName.isEmpty() ? "unknown" : state.deviceName) << "\n";
-    out << "model: " << toModelString(state.model) << "\n";
-    out << "noise_control: " << toNoiseControlString(state.noiseControlMode) << "\n";
-    out << "conversational_awareness: " << (state.conversationalAwareness ? "on" : "off") << "\n";
-    out << "hearing_aid: " << (state.hearingAidEnabled ? "on" : "off") << "\n";
-    out << "left_battery: " << formatBattery(left) << "\n";
-    out << "right_battery: " << formatBattery(right) << "\n";
-    out << "case_battery: " << formatBattery(caze) << "\n";
-    out << "left_in_ear: " << (ears.isPrimaryInEar() ? "yes" : "no") << "\n";
-    out << "right_in_ear: " << (ears.isSecondaryInEar() ? "yes" : "no") << "\n";
-    out.flush();
+    QJsonObject obj;
+    obj.insert("connected", true);
+    obj.insert("address", state.bluetoothAddress);
+    obj.insert("name", state.deviceName.isEmpty() ? "unknown" : state.deviceName);
+    obj.insert("model", toModelString(state.model));
+    obj.insert("noise_control", toNoiseControlString(state.noiseControlMode));
+    obj.insert("conversational_awareness", state.conversationalAwareness);
+    obj.insert("hearing_aid", state.hearingAidEnabled);
+    obj.insert("left_battery", left.status == Battery::BatteryStatus::Disconnected ? QJsonValue::Null : QJsonValue(static_cast<int>(left.level)));
+    obj.insert("right_battery", right.status == Battery::BatteryStatus::Disconnected ? QJsonValue::Null : QJsonValue(static_cast<int>(right.level)));
+    obj.insert("case_battery", caze.status == Battery::BatteryStatus::Disconnected ? QJsonValue::Null : QJsonValue(static_cast<int>(caze.level)));
+    obj.insert("left_in_ear", ears.isPrimaryInEar());
+    obj.insert("right_in_ear", ears.isSecondaryInEar());
+    return obj;
 }
 
-void printDisconnectedStatus(const QString &address, bool asJson)
+QJsonObject disconnectedStatusObject(const QString &address)
+{
+    QJsonObject obj;
+    obj.insert("connected", false);
+    obj.insert("address", address.isEmpty() ? QJsonValue::Null : QJsonValue(address));
+    obj.insert("name", QJsonValue::Null);
+    obj.insert("model", QJsonValue::Null);
+    obj.insert("noise_control", QJsonValue::Null);
+    obj.insert("conversational_awareness", QJsonValue::Null);
+    obj.insert("hearing_aid", QJsonValue::Null);
+    obj.insert("left_battery", QJsonValue::Null);
+    obj.insert("right_battery", QJsonValue::Null);
+    obj.insert("case_battery", QJsonValue::Null);
+    obj.insert("left_in_ear", QJsonValue::Null);
+    obj.insert("right_in_ear", QJsonValue::Null);
+    return obj;
+}
+
+void printStatusObject(const QJsonObject &obj, bool asJson)
 {
     if (asJson)
     {
-        QJsonObject obj;
-        obj.insert("connected", false);
-        obj.insert("address", address.isEmpty() ? QJsonValue::Null : QJsonValue(address));
-        obj.insert("name", QJsonValue::Null);
-        obj.insert("model", QJsonValue::Null);
-        obj.insert("noise_control", QJsonValue::Null);
-        obj.insert("conversational_awareness", QJsonValue::Null);
-        obj.insert("hearing_aid", QJsonValue::Null);
-        obj.insert("left_battery", QJsonValue::Null);
-        obj.insert("right_battery", QJsonValue::Null);
-        obj.insert("case_battery", QJsonValue::Null);
-        obj.insert("left_in_ear", QJsonValue::Null);
-        obj.insert("right_in_ear", QJsonValue::Null);
         QTextStream(stdout) << QJsonDocument(obj).toJson(QJsonDocument::Compact) << "\n";
         return;
     }
 
     QTextStream out(stdout);
-    out << "connected: no\n";
-    out << "address: " << (address.isEmpty() ? "n/a" : address) << "\n";
+    const auto formatNullable = [](const QJsonValue &value) -> QString
+    {
+        if (value.isNull() || value.isUndefined())
+        {
+            return "n/a";
+        }
+        return value.toVariant().toString();
+    };
+    const auto formatOnOff = [](const QJsonValue &value) -> QString
+    {
+        if (value.isNull() || value.isUndefined())
+        {
+            return "n/a";
+        }
+        return value.toBool() ? "on" : "off";
+    };
+    const auto formatYesNo = [](const QJsonValue &value) -> QString
+    {
+        if (value.isNull() || value.isUndefined())
+        {
+            return "n/a";
+        }
+        return value.toBool() ? "yes" : "no";
+    };
+
+    const bool connected = obj.value("connected").toBool(false);
+    out << "connected: " << (connected ? "yes" : "no") << "\n";
+    out << "address: " << formatNullable(obj.value("address")) << "\n";
+    if (!connected)
+    {
+        out.flush();
+        return;
+    }
+
+    out << "name: " << formatNullable(obj.value("name")) << "\n";
+    out << "model: " << formatNullable(obj.value("model")) << "\n";
+    out << "noise_control: " << formatNullable(obj.value("noise_control")) << "\n";
+    out << "conversational_awareness: " << formatOnOff(obj.value("conversational_awareness")) << "\n";
+    out << "hearing_aid: " << formatOnOff(obj.value("hearing_aid")) << "\n";
+    out << "left_battery: " << formatNullable(obj.value("left_battery")) << "\n";
+    out << "right_battery: " << formatNullable(obj.value("right_battery")) << "\n";
+    out << "case_battery: " << formatNullable(obj.value("case_battery")) << "\n";
+    out << "left_in_ear: " << formatYesNo(obj.value("left_in_ear")) << "\n";
+    out << "right_in_ear: " << formatYesNo(obj.value("right_in_ear")) << "\n";
     out.flush();
+}
+
+bool sendDaemonRequest(const QString &socketPath, const QJsonObject &request,
+                       QJsonObject &response, QString &error, int connectTimeoutMs = 250,
+                       int responseTimeoutMs = 8000,
+                       QLocalSocket::LocalSocketError *socketErrorOut = nullptr)
+{
+    QLocalSocket socket;
+    socket.setSocketOptions(QLocalSocket::AbstractNamespaceOption);
+    socket.connectToServer(controlSocketNameForPath(socketPath));
+    if (!socket.waitForConnected(connectTimeoutMs))
+    {
+        if (socketErrorOut)
+        {
+            *socketErrorOut = socket.error();
+        }
+        error = socket.errorString();
+        return false;
+    }
+
+    const QByteArray payload = QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n';
+    if (socket.write(payload) != payload.size() || !socket.waitForBytesWritten(responseTimeoutMs))
+    {
+        if (socketErrorOut)
+        {
+            *socketErrorOut = socket.error();
+        }
+        error = socket.errorString().isEmpty() ? QStringLiteral("failed to write daemon request")
+                                               : socket.errorString();
+        return false;
+    }
+
+    QByteArray responsePayload;
+    while (!responsePayload.contains('\n'))
+    {
+        if (!socket.waitForReadyRead(responseTimeoutMs))
+        {
+            if (socketErrorOut)
+            {
+                *socketErrorOut = socket.error();
+            }
+            error = socket.errorString().isEmpty() ? QStringLiteral("timeout waiting for daemon response")
+                                                   : socket.errorString();
+            return false;
+        }
+        responsePayload += socket.readAll();
+    }
+
+    const int newline = responsePayload.indexOf('\n');
+    const QJsonDocument doc = QJsonDocument::fromJson(responsePayload.left(newline));
+    if (!doc.isObject())
+    {
+        if (socketErrorOut)
+        {
+            *socketErrorOut = socket.error();
+        }
+        error = QStringLiteral("invalid daemon response");
+        return false;
+    }
+
+    response = doc.object();
+    return true;
 }
 
 void printCliHelp(QTextStream &out)
@@ -437,6 +551,7 @@ void printCliHelp(QTextStream &out)
     out << "Options:\n";
     out << "  -h, --help               Display this help message\n";
     out << "  -m, --mac <mac>          Bluetooth address of AirPods (optional)\n";
+    out << "      --daemon-socket <path>  Override the daemon control socket path\n";
     out << "  -j, --json               Output status in JSON format\n";
     out << "  -d, --debug              Enable verbose debug logs\n";
     out << "  -t, --timeout <seconds>  Timeout in seconds\n\n";
@@ -460,6 +575,7 @@ int main(int argc, char *argv[])
     parser.addPositionalArgument("command", "connect | disconnect | status | mode | ca");
     parser.addPositionalArgument("value", "Command value: mode (off|nc|transparency|adaptive), ca (on|off)", "[value]");
     parser.addOption({{"m", "mac"}, "Bluetooth address of AirPods (optional)", "mac"});
+    parser.addOption({"daemon-socket", "Override the daemon control socket path", "path", defaultControlSocketPath()});
     parser.addOption({{"j", "json"}, "Output status in JSON format"});
     parser.addOption({{"d", "debug"}, "Enable verbose debug logs"});
     parser.addOption({{"t", "timeout"}, "Timeout in seconds", "seconds", "12"});
@@ -476,6 +592,7 @@ int main(int argc, char *argv[])
     const QString command = positional.isEmpty() ? QString() : positional.first().trimmed().toLower();
     const QString valuePositional = positional.size() > 1 ? positional.at(1) : QString();
     const QString mac = normalizeMac(parser.value("mac"));
+    const QString daemonSocketPath = parser.value("daemon-socket");
     const bool jsonOutput = parser.isSet("json");
     const bool debugOutput = parser.isSet("debug");
     const int timeoutSec = parser.value("timeout").toInt();
@@ -523,6 +640,55 @@ int main(int argc, char *argv[])
         {
             QTextStream(stderr) << "invalid ca value, expected: on|off\n";
             return 2;
+        }
+    }
+
+    if (command == "status" || command == "mode" || command == "ca")
+    {
+        QJsonObject request;
+        request.insert("command", command);
+        if (!mac.isEmpty())
+        {
+            request.insert("mac", mac);
+        }
+        if (command == "mode")
+        {
+            request.insert("value", toNoiseControlString(targetMode));
+        }
+        else if (command == "ca")
+        {
+            request.insert("enabled", targetCaEnabled);
+        }
+
+        QJsonObject response;
+        QString daemonError;
+        QLocalSocket::LocalSocketError daemonSocketError = QLocalSocket::UnknownSocketError;
+        if (!sendDaemonRequest(daemonSocketPath, request, response, daemonError, 250,
+                               qMax(5, timeoutSec) * 1000, &daemonSocketError))
+        {
+            const bool daemonUnavailable =
+                daemonSocketError == QLocalSocket::ServerNotFoundError ||
+                daemonSocketError == QLocalSocket::ConnectionRefusedError;
+            if (!daemonUnavailable)
+            {
+                QTextStream(stderr) << "daemon control failed: " << daemonError << "\n";
+                return 5;
+            }
+        }
+        else
+        {
+            const QJsonObject status = response.value("status").toObject();
+            if (!status.isEmpty())
+            {
+                printStatusObject(status, jsonOutput);
+            }
+
+            if (!response.value("ok").toBool(false))
+            {
+                QTextStream(stderr) << response.value("error").toString("daemon command failed") << "\n";
+                return 4;
+            }
+            return 0;
         }
     }
 
@@ -725,7 +891,7 @@ int main(int argc, char *argv[])
         {
             if (command == "status")
             {
-                printDisconnectedStatus(QString(), jsonOutput);
+                printStatusObject(disconnectedStatusObject(QString()), jsonOutput);
                 return 0;
             }
             err << "no AirPods found in BlueZ list, connect first\n";
@@ -738,7 +904,7 @@ int main(int argc, char *argv[])
     {
         if (command == "status")
         {
-            printDisconnectedStatus(statusMac, jsonOutput);
+            printStatusObject(disconnectedStatusObject(statusMac), jsonOutput);
             return 0;
         }
 
@@ -791,7 +957,7 @@ int main(int argc, char *argv[])
         }
         statusPollTimer.stop();
         printed = true;
-        printStatus(client, jsonOutput);
+        printStatusObject(localStatusObject(client), jsonOutput);
         QCoreApplication::exit(0);
     };
 
@@ -1002,7 +1168,7 @@ int main(int argc, char *argv[])
                 if (batteryDataSeen && earDataSeen && !printed)
                 {
                     printed = true;
-                    printStatus(client, jsonOutput);
+                    printStatusObject(localStatusObject(client), jsonOutput);
                     QCoreApplication::exit(0);
                 }
             }
@@ -1016,7 +1182,7 @@ int main(int argc, char *argv[])
                 if (batteryDataSeen && earDataSeen && !printed)
                 {
                     printed = true;
-                    printStatus(client, jsonOutput);
+                    printStatusObject(localStatusObject(client), jsonOutput);
                     QCoreApplication::exit(0);
                 }
             }
@@ -1087,7 +1253,7 @@ int main(int argc, char *argv[])
                 QTextStream(stderr) << "timeout waiting for ear-detection update, printing partial status\n";
             }
             statusPollTimer.stop();
-            printStatus(client, jsonOutput);
+            printStatusObject(localStatusObject(client), jsonOutput);
             QCoreApplication::exit(4);
             return;
         }
@@ -1120,18 +1286,35 @@ QString toModelString(AirPodsModel model)
     }
 }
 
+bool parseDaemonModeValue(const QString &raw, NoiseControlMode &mode)
+{
+    const QString value = raw.trimmed().toLower();
+    if (value == "off")
+    {
+        mode = NoiseControlMode::Off;
+        return true;
+    }
+    if (value == "nc" || value == "noise-cancellation")
+    {
+        mode = NoiseControlMode::NoiseCancellation;
+        return true;
+    }
+    if (value == "transparency")
+    {
+        mode = NoiseControlMode::Transparency;
+        return true;
+    }
+    if (value == "adaptive")
+    {
+        mode = NoiseControlMode::Adaptive;
+        return true;
+    }
+    return false;
+}
+
 QString defaultStatePath()
 {
-    QString root = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
-    if (root.isEmpty())
-    {
-        root = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation);
-    }
-    if (root.isEmpty())
-    {
-        root = QDir::homePath() + "/.cache";
-    }
-    return root + "/vibepods/status.json";
+    return defaultRuntimeRoot() + "/status.json";
 }
 
 bool ensureParentDir(const QString &path)
@@ -1215,11 +1398,12 @@ bool installSignalHandlers()
 class VibepodsDaemon : public QObject
 {
 public:
-    VibepodsDaemon(QString configuredMac, QString statePath, int bluezPollSeconds,
+    VibepodsDaemon(QString configuredMac, QString statePath, QString controlSocketPath, int bluezPollSeconds,
                    int snapshotIntervalSeconds, QObject *parent = nullptr)
         : QObject(parent),
           configuredMac_(std::move(configuredMac)),
-          statePath_(std::move(statePath))
+          statePath_(std::move(statePath)),
+          controlSocketPath_(std::move(controlSocketPath))
     {
         qDBusRegisterMetaType<QDBusObjectPath>();
         qDBusRegisterMetaType<ManagedObjectList>();
@@ -1238,6 +1422,18 @@ public:
             requestSnapshot("interval");
         });
 
+        pendingControlTimer_.setSingleShot(true);
+
+        connect(&controlServer_, &QLocalServer::newConnection, this, [this]()
+        {
+            handleControlConnection();
+        });
+
+        connect(&pendingControlTimer_, &QTimer::timeout, this, [this]()
+        {
+            finishPendingControl(false, QStringLiteral("timeout waiting for daemon command confirmation"));
+        });
+
         connect(&client_, &AirPodsCoreClient::connected, this, [this]()
         {
             lastError_.clear();
@@ -1248,6 +1444,10 @@ public:
 
         connect(&client_, &AirPodsCoreClient::disconnected, this, [this]()
         {
+            if (pendingControlKind_ != PendingControlKind::None)
+            {
+                finishPendingControl(false, QStringLiteral("daemon disconnected from AirPods"));
+            }
             markStateDirty();
             writeStateFile();
         });
@@ -1267,6 +1467,7 @@ public:
             rememberKnownState();
             markStateDirty();
             writeStateFile();
+            tryCompletePendingControl();
         });
 
         connect(&client_, &AirPodsCoreClient::errorOccurred, this, [this](const QString &message)
@@ -1275,11 +1476,16 @@ public:
             markStateDirty();
             QTextStream(stderr) << "error: " << message << "\n";
             writeStateFile();
+            if (pendingControlKind_ != PendingControlKind::None)
+            {
+                finishPendingControl(false, message);
+            }
         });
     }
 
     void start()
     {
+        startControlServer();
         writeStateFile();
         syncBluezState();
         bluezPollTimer_.start();
@@ -1301,15 +1507,250 @@ public:
     {
         daemonRunning_ = false;
         bluezConnected_ = false;
+        if (pendingControlKind_ != PendingControlKind::None)
+        {
+            finishPendingControl(false, QStringLiteral("daemon is shutting down"));
+        }
         if (client_.isConnected())
         {
             client_.disconnectFromDevice();
         }
+        controlServer_.close();
         markStateDirty();
         writeStateFile();
     }
 
 private:
+    enum class PendingControlKind
+    {
+        None,
+        Mode,
+        Ca,
+    };
+
+    void startControlServer()
+    {
+        controlServer_.setSocketOptions(QLocalServer::UserAccessOption | QLocalServer::AbstractNamespaceOption);
+        if (!controlServer_.listen(controlSocketNameForPath(controlSocketPath_)))
+        {
+            QTextStream(stderr) << "warning: failed to listen on daemon control socket "
+                                << controlSocketPath_ << ": "
+                                << controlServer_.errorString() << "\n";
+        }
+    }
+
+    void handleControlConnection()
+    {
+        while (QLocalSocket *socket = controlServer_.nextPendingConnection())
+        {
+            const auto buffer = QSharedPointer<QByteArray>::create();
+            connect(socket, &QLocalSocket::readyRead, this, [this, socket, buffer]()
+            {
+                *buffer += socket->readAll();
+                const int newline = buffer->indexOf('\n');
+                if (newline < 0)
+                {
+                    return;
+                }
+
+                const QByteArray payload = buffer->left(newline);
+                processControlRequest(socket, payload);
+            });
+            connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+        }
+    }
+
+    void sendControlReply(QLocalSocket *socket, bool ok, const QString &error = QString())
+    {
+        if (!socket)
+        {
+            clearPendingControl();
+            return;
+        }
+
+        QJsonObject reply;
+        reply.insert("ok", ok);
+        reply.insert("error", error.isEmpty() ? QJsonValue::Null : QJsonValue(error));
+        reply.insert("status", buildStateObject());
+        socket->write(QJsonDocument(reply).toJson(QJsonDocument::Compact) + '\n');
+        socket->flush();
+        socket->waitForBytesWritten(1000);
+        socket->disconnectFromServer();
+    }
+
+    void clearPendingControl()
+    {
+        pendingControlSocket_.clear();
+        pendingControlKind_ = PendingControlKind::None;
+        pendingTargetCaEnabled_ = false;
+        pendingTargetMode_ = NoiseControlMode::Off;
+        pendingControlTimer_.stop();
+    }
+
+    void finishPendingControl(bool ok, const QString &error = QString())
+    {
+        QPointer<QLocalSocket> socket = pendingControlSocket_;
+        clearPendingControl();
+        sendControlReply(socket, ok, error);
+    }
+
+    void tryCompletePendingControl()
+    {
+        if (pendingControlKind_ == PendingControlKind::Mode &&
+            client_.state().noiseControlMode == pendingTargetMode_)
+        {
+            finishPendingControl(true);
+            return;
+        }
+        if (pendingControlKind_ == PendingControlKind::Ca &&
+            client_.state().conversationalAwareness == pendingTargetCaEnabled_)
+        {
+            finishPendingControl(true);
+        }
+    }
+
+    bool beginPendingControl(QLocalSocket *socket, PendingControlKind kind)
+    {
+        if (pendingControlKind_ != PendingControlKind::None)
+        {
+            sendControlReply(socket, false, QStringLiteral("daemon is already processing another command"));
+            return false;
+        }
+
+        pendingControlSocket_ = socket;
+        pendingControlKind_ = kind;
+        pendingControlTimer_.start(6000);
+        return true;
+    }
+
+    void processControlRequest(QLocalSocket *socket, const QByteArray &payload)
+    {
+        const QJsonDocument doc = QJsonDocument::fromJson(payload);
+        if (!doc.isObject())
+        {
+            sendControlReply(socket, false, QStringLiteral("invalid daemon request"));
+            return;
+        }
+
+        const QJsonObject request = doc.object();
+        const QString command = request.value("command").toString().trimmed().toLower();
+        const QString targetMac = configuredMac_.isEmpty() ? selectedMac_ : configuredMac_;
+        const QString requestedMac = normalizeMac(request.value("mac").toString());
+
+        if (!requestedMac.isEmpty() && !targetMac.isEmpty() &&
+            requestedMac.compare(targetMac, Qt::CaseInsensitive) != 0)
+        {
+            sendControlReply(socket, false, QStringLiteral("daemon is managing a different AirPods device"));
+            return;
+        }
+
+        if (command == "status")
+        {
+            requestSnapshot("ipc-status");
+            sendControlReply(socket, true);
+            return;
+        }
+
+        if (!bluezConnected_)
+        {
+            sendControlReply(socket, false, QStringLiteral("AirPods not connected"));
+            return;
+        }
+        if (!client_.isConnected() || !client_.isProtocolReady())
+        {
+            sendControlReply(socket, false, QStringLiteral("daemon is not ready yet"));
+            return;
+        }
+
+        if (command == "mode")
+        {
+            NoiseControlMode targetMode = NoiseControlMode::Off;
+            if (!parseDaemonModeValue(request.value("value").toString(), targetMode))
+            {
+                sendControlReply(socket, false, QStringLiteral("invalid mode value"));
+                return;
+            }
+            if (client_.state().noiseControlMode == targetMode)
+            {
+                requestSnapshot("ipc-mode");
+                sendControlReply(socket, true);
+                return;
+            }
+            if (!beginPendingControl(socket, PendingControlKind::Mode))
+            {
+                return;
+            }
+            pendingTargetMode_ = targetMode;
+            if (!client_.setNoiseControlMode(targetMode))
+            {
+                finishPendingControl(false, QStringLiteral("failed to send mode command"));
+                return;
+            }
+            QTimer::singleShot(250, this, [this]()
+            {
+                requestSnapshot("ipc-mode");
+            });
+            return;
+        }
+
+        if (command == "ca")
+        {
+            const QJsonValue enabledValue = request.value("enabled");
+            if (!enabledValue.isBool())
+            {
+                sendControlReply(socket, false, QStringLiteral("invalid ca value"));
+                return;
+            }
+            const bool enabled = enabledValue.toBool();
+            if (client_.state().conversationalAwareness == enabled)
+            {
+                requestSnapshot("ipc-ca");
+                sendControlReply(socket, true);
+                return;
+            }
+            if (!beginPendingControl(socket, PendingControlKind::Ca))
+            {
+                return;
+            }
+
+            pendingTargetCaEnabled_ = enabled;
+            auto issueCaCommand = [this]()
+            {
+                if (pendingControlKind_ != PendingControlKind::Ca)
+                {
+                    return;
+                }
+                if (!client_.setConversationalAwareness(pendingTargetCaEnabled_))
+                {
+                    finishPendingControl(false, QStringLiteral("failed to send ca command"));
+                    return;
+                }
+                QTimer::singleShot(250, this, [this]()
+                {
+                    requestSnapshot("ipc-ca");
+                });
+            };
+
+            if (enabled &&
+                client_.state().noiseControlMode != NoiseControlMode::Adaptive &&
+                client_.state().noiseControlMode != NoiseControlMode::Transparency)
+            {
+                if (!client_.setNoiseControlMode(NoiseControlMode::Adaptive))
+                {
+                    finishPendingControl(false, QStringLiteral("failed to switch to adaptive mode before enabling ca"));
+                    return;
+                }
+                QTimer::singleShot(350, this, issueCaCommand);
+                return;
+            }
+
+            issueCaCommand();
+            return;
+        }
+
+        sendControlReply(socket, false, QStringLiteral("unsupported daemon command"));
+    }
+
     bool requestSnapshot(const QString &reason)
     {
         if (!bluezConnected_ || !client_.isConnected() || !client_.isProtocolReady())
@@ -1493,6 +1934,7 @@ private:
         obj.insert("last_refresh_at", lastRefreshAt_.isValid() ? QJsonValue(lastRefreshAt_.toString(Qt::ISODateWithMs))
                                                                : QJsonValue::Null);
         obj.insert("state_path", statePath_);
+        obj.insert("control_socket", controlSocketPath_);
         obj.insert("source", "daemon");
         obj.insert("last_error", lastError_.isEmpty() ? QJsonValue::Null : QJsonValue(lastError_));
         return obj;
@@ -1536,6 +1978,7 @@ private:
     QString lastKnownAddress_;
     QString lastKnownName_;
     QString statePath_;
+    QString controlSocketPath_;
     QString lastError_;
     QDateTime lastRefreshAt_;
     QDateTime lastStateChangeAt_;
@@ -1545,6 +1988,12 @@ private:
     AirPodsCoreClient client_;
     QTimer bluezPollTimer_;
     QTimer snapshotTimer_;
+    QLocalServer controlServer_;
+    QTimer pendingControlTimer_;
+    QPointer<QLocalSocket> pendingControlSocket_;
+    PendingControlKind pendingControlKind_ = PendingControlKind::None;
+    NoiseControlMode pendingTargetMode_ = NoiseControlMode::Off;
+    bool pendingTargetCaEnabled_ = false;
 };
 
 } // namespace
@@ -1561,6 +2010,7 @@ int main(int argc, char *argv[])
     parser.addVersionOption();
     parser.addOption({{"m", "mac"}, "Bluetooth address of AirPods (optional)", "mac"});
     parser.addOption({{"o", "output"}, "JSON state file path", "path", defaultStatePath()});
+    parser.addOption({"control-socket", "Daemon control socket path", "path", defaultControlSocketPath()});
     parser.addOption({{"b", "bluez-poll"}, "BlueZ poll interval in seconds", "seconds", "5"});
     parser.addOption({{"s", "snapshot-interval"}, "Periodic status snapshot interval in seconds (0 disables it)",
                       "seconds", "0"});
@@ -1601,7 +2051,8 @@ int main(int argc, char *argv[])
         return 3;
     }
 
-    VibepodsDaemon daemon(mac, parser.value("output"), bluezPollSeconds, snapshotIntervalSeconds);
+    VibepodsDaemon daemon(mac, parser.value("output"), parser.value("control-socket"),
+                          bluezPollSeconds, snapshotIntervalSeconds);
     QSocketNotifier signalNotifier(gSignalPipe[0], QSocketNotifier::Read);
 
     QObject::connect(&signalNotifier, &QSocketNotifier::activated, &app, [&](QSocketDescriptor)

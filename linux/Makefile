@@ -13,10 +13,10 @@ QT_HOST_BINS := $(shell pkg-config --variable=host_bins Qt6Core 2>/dev/null)
 QT_LIBEXECDIR := $(shell pkg-config --variable=libexecdir Qt6Core 2>/dev/null)
 MOC := $(if $(QT_HOST_BINS),$(QT_HOST_BINS)/moc,$(if $(QT_LIBEXECDIR),$(QT_LIBEXECDIR)/moc,moc))
 
-QT_PACKAGES := Qt6Core Qt6Bluetooth Qt6DBus
+QT_PACKAGES := Qt6Core Qt6Bluetooth Qt6DBus Qt6Network
 QT_CFLAGS := $(shell pkg-config --cflags $(QT_PACKAGES))
-QT_LIBS_CORE := $(shell pkg-config --libs Qt6Core Qt6Bluetooth)
-QT_LIBS_CLI := $(shell pkg-config --libs Qt6Core Qt6Bluetooth Qt6DBus)
+QT_LIBS_CORE := $(shell pkg-config --libs Qt6Core Qt6Bluetooth Qt6Network)
+QT_LIBS_CLI := $(shell pkg-config --libs Qt6Core Qt6Bluetooth Qt6DBus Qt6Network)
 
 CXXSTD := -std=c++17
 WARNFLAGS := -Wall -Wextra -Wpedantic
